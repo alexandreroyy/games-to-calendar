@@ -7,6 +7,7 @@ import asyncio
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
@@ -24,11 +25,21 @@ class DDLCGameFetcher:
     def _normalize_team(name):
         return name.replace('’', "'").replace('‘', "'").strip()
 
-    def __init__(self, url="https://www.ddlc.ca/ligues/calendrier/"):
+    def __init__(self, mode="default", url="https://www.ddlc.ca/ligues/calendrier/"):
         load_dotenv()
-        team_names_str = os.getenv('TEAM_NAMES')
-        if not team_names_str:
-            raise ValueError("TEAM_NAMES not found in .env file. Please configure your team names.")
+        self.mode = mode
+
+        if mode == "gab":
+            team_names_str = os.getenv('GAB_TEAM_NAMES')
+            if not team_names_str:
+                raise ValueError("GAB_TEAM_NAMES not found in .env file. Please configure your gab team names.")
+            self.gab_calendar_staug = os.getenv('GAB_CALENDAR_STAUG', 'Dek St-Aug GAB')
+            self.gab_calendar_chauveau = os.getenv('GAB_CALENDAR_CHAUVEAU', 'Dek Chauveau GAB')
+        else:
+            team_names_str = os.getenv('TEAM_NAMES')
+            if not team_names_str:
+                raise ValueError("TEAM_NAMES not found in .env file. Please configure your team names.")
+
         self.team_names = [self._normalize_team(name) for name in team_names_str.split(',')]
         season = os.getenv('SEASON')
         if not season:
@@ -68,6 +79,32 @@ class DDLCGameFetcher:
             return game_datetime
         except ValueError:
             return None
+
+    def _classify_game(self, venue, category, our_team):
+        """Map a game's venue to (calendar_name, event_title), or None to skip.
+
+        Branches on self.mode: default uses the regular calendars and
+        'game {category}' titles; gab uses the GAB calendars and titles the
+        event after our own team (parenthetical stripped)."""
+        venue_lower = venue.lower()
+        is_staug = "(st-aug" in venue_lower
+        is_chauveau = "(chauveau" in venue_lower
+
+        if self.mode == "gab":
+            team_title = re.sub(r'\s*\([^)]*\)', '', our_team).strip()
+            if is_staug:
+                return self.gab_calendar_staug, team_title
+            if is_chauveau:
+                return self.gab_calendar_chauveau, team_title
+            return None
+
+        if is_staug:
+            return "Dek St-Aug", f"game {category}"
+        if is_chauveau:
+            return "Dek Chauveau", f"game {category}"
+        if "lévis" in venue_lower or "levis" in venue_lower:
+            return "Autre", f"game {category} Levis"
+        return None
 
     async def fetch_games(self):
         """Fetch games from the DDLC website using Playwright."""
@@ -246,18 +283,11 @@ class DDLCGameFetcher:
                 if game_datetime < datetime.now():
                     continue
 
-                if "(St-Aug" in venue or "(st-aug" in venue.lower():
-                    calendar = "Dek St-Aug"
-                    title = f"game {category}"
-                elif "(Chauveau" in venue or "(chauveau" in venue.lower():
-                    calendar = "Dek Chauveau"
-                    title = f"game {category}"
-                elif "lévis" in venue.lower() or "levis" in venue.lower():
-                    calendar = "Autre"
-                    title = f"game {category} Levis"
-                else:
+                classification = self._classify_game(venue, category, our_team)
+                if classification is None:
                     print(f"  Skipped: Unknown venue '{venue}' for {our_team} vs {opponent}")
                     continue
+                calendar, title = classification
 
                 venue_name = re.sub(r'\s*\([^)]*\)', '', venue).strip()
 
@@ -366,9 +396,12 @@ class DDLCGameFetcher:
 
 
 async def main():
-    fetcher = DDLCGameFetcher()
+    mode = "gab" if len(sys.argv) > 1 and sys.argv[1].lower() == "gab" else "default"
+    fetcher = DDLCGameFetcher(mode=mode)
 
     print("Fetching games from DDLC website...")
+    if mode == "gab":
+        print("Mode: gab")
     print(f"Looking for teams: {', '.join(fetcher.team_names)}\n")
 
     games = await fetcher.fetch_games()
